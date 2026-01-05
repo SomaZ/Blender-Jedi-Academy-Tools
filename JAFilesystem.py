@@ -18,12 +18,10 @@
 
 import os
 
-# name of the directory containing base / the mod folders, e.g. gamedata for Jedi Academy (in lowercase)
-# TODO #9 / #33: SoF2 does not have a gamedata, make guessing more lenient
-DIRNAME = "gamedata"
+DIRNAME = "models"
 
 
-# returns the prefix and the rest, e.g. ("/foo/bar/JKA/GameData/Base", "textures/img.jpg") (where GameData is DIRNAME)
+# returns the prefix and the rest, e.g. ("/foo/bar/JKA/GameData/Base", "textures/img.jpg") (where models is DIRNAME)
 
 def SplitPrefix(fullPath):
     normFullPath = os.path.normpath(fullPath)
@@ -32,7 +30,6 @@ def SplitPrefix(fullPath):
     # find /DIRNAME/
     if pos == -1:
         return "", normFullPath
-    pos = pos+len(DIRNAME)+2*len(os.path.sep)
     # find first / after that
     pos = searchme.find(os.path.sep, pos)
     if pos == -1:
