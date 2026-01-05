@@ -18,7 +18,7 @@
 
 
 from .mod_reload import reload_modules
-reload_modules(locals(), __package__, ["JAStringhelper", "JAFilesystem", "JAG2Constants", "JAG2GLA", "JAMaterialmanager", "MrwProfiler", "JAG2Panels"], [".casts", ".error_types"])  # nopep8
+reload_modules(locals(), __package__, ["JAStringhelper", "JAFilesystem", "JAG2Constants", "JAG2GLA", "JAMaterialmanager", "JASurfaceFactory", "MrwProfiler", "JAG2Panels"], [".casts", ".error_types"])  # nopep8
 
 from dataclasses import dataclass
 from typing import BinaryIO, Dict, List, Optional, Sequence, Tuple, cast
@@ -30,7 +30,8 @@ from . import JAG2GLA
 from . import JAMaterialmanager
 from . import MrwProfiler
 from . import JAG2Panels
-from .casts import optional_cast, downcast, bpy_generic_cast, unpack_cast, matrix_getter_cast, matrix_overload_cast, vector_getter_cast, vector_overload_cast
+from . import JASurfaceFactory
+from .casts import optional_cast,optional_list_cast, downcast, bpy_generic_cast, unpack_cast, matrix_getter_cast, matrix_overload_cast, vector_getter_cast, vector_overload_cast
 from .error_types import ErrorMessage, NoError, ensureListIsGapless
 
 import bpy
@@ -260,6 +261,13 @@ class MdxmSurfaceData:
                 self.children.append(surfaceIndexMap[childName])
                 self.numChildren += 1
         return True, NoError
+    
+    def loadFromSurfaceDesriptor(self, surface_descriptor):
+        self.name: bytes = surface_descriptor.surface_name.encode()
+        self.shader: bytes = surface_descriptor.material.encode()
+        self.flags = surface_descriptor.flags
+        self.parentIndex = surface_descriptor.parent_index
+        self.num_children = surface_descriptor.num_children
 
     def saveToFile(self, file: BinaryIO) -> None:
         # 0 is the shader index, only used ingame
@@ -290,6 +298,22 @@ class MdxmSurfaceDataCollection:
     def loadFromBlender(self, rootObject: bpy.types.Object, surfaceIndexMap: Dict[str, int]) -> Tuple[bool, ErrorMessage]:
         visitedChildren: Dict[str, bpy.types.Object] = {}
         surfaces: List[Optional[MdxmSurfaceData]] = []
+
+        #factory = JASurfaceFactory.Surface_factory(rootObject, 1000)
+        #print(factory.valid, factory.status)
+        #for sd in factory.surface_descriptors:
+        #    if (sd.parent_index) == -1:
+        #        print("sdobject_name", sd.surface_name, "is root and has", sd.num_children, "children")
+        #        continue
+        #    print(
+        #        "sdobject_name",
+        #        sd.surface_name,
+        #        "parented to",
+        #        factory.surface_descriptors[sd.parent_index].surface_name,
+        #        "and has",
+        #        sd.num_children,
+        #        "children"
+        #        )
 
         def addChildren(object: bpy.types.Object) -> Tuple[bool, ErrorMessage]:
             for child in object.children:
@@ -335,6 +359,15 @@ class MdxmSurfaceDataCollection:
         if gaplessSurfaces is None:
             return False, ErrorMessage(f"Internal error during hierarchy creation! (Missing Surfaces: {err})")
         self.surfaces = gaplessSurfaces
+        return True, NoError
+    
+    def loadFromSurfaceFactory(self, surface_factory):
+        for sd in surface_factory.surface_descriptors:
+            surface = MdxmSurfaceData()
+            surface.loadFromSurfaceDesriptor(sd)
+            self.surfaces.append(surface)
+        if len(self.surfaces) == 0:
+            return False, ErrorMessage(f"Could not find any surfaces in surface_factory!")
         return True, NoError
 
     def saveToFile(self, file: BinaryIO) -> None:
@@ -541,6 +574,9 @@ class MdxmSurface:
             print(
                 "Warning: Surface structure unordered (bone references not last) or read error")
             file.seek(startPos + self.ofsEnd)
+
+    def loadFromSurfaceDescriptor(self, sd):
+        
 
     def loadFromBlender(self, object: bpy.types.Object, surfaceData: MdxmSurfaceData, boneIndexMap: Optional[BoneIndexMap], armatureObject: Optional[bpy.types.Object]) -> Tuple[bool, ErrorMessage]:
         if object.type != 'MESH':
@@ -858,6 +894,28 @@ class MdxmLOD:
             surfaces=gaplessSurfaces,
             ofsEnd=-1,  # FIXME: avoid this invalid state
         ), NoError
+    
+    @staticmethod
+    def loadFromSurfaceFactory(level, surface_factory, surfaceIndexMap: Dict[str, int]):
+        surfaces: List[Optional[MdxmSurface]] = [None] * len(surfaceIndexMap)
+        for sd in surface_factory.surface_descriptors:
+            if sd.name not in surfaceIndexMap:
+                print("Error. Have additional surfaces in a lod but not in the hirarchie")
+            surf = MdxmSurface()
+            surf.loadFromSurfaceDescriptor(sd)
+            surfaces[surfaceIndexMap[sd.name]] = surf
+        empty_indices = [i for i, x in enumerate(surfaces) if x is None]
+        for empty_index in empty_indices:
+            surf = MdxmSurface()
+            surf.makeEmpty()
+            surfaces[empty_index] = surf
+
+        return MdxmLOD(
+            surfaceOffsets=[],  # FIXME: avoid this invalid state
+            level=level,
+            surfaces=surfaces,
+            ofsEnd=-1,  # FIXME: avoid this invalid state
+        ), NoError
 
     def saveToBlender(self, data: ImportMetadata, root: bpy.types.Object):
         # 1st pass: create objects
@@ -875,7 +933,7 @@ class MdxmLOD:
             obj.parent = parent
 
     # fills self.surfaceOffsets and self.ofsEnd based on self.surfaces (must be initialized)
-    def calculateOffsets(self, myOffset):
+    def calculateOffsets(self):
         self.surfaceOffsets = []
         # ofsEnd is in front of offsets, but they are relative to their start
         offset = 4 * len(self.surfaces)
@@ -914,11 +972,23 @@ class MdxmLODCollection:
                 return False, ErrorMessage(f"loading LOD {lodLevel} from Blender: {message}")
             self.LODs.append(lod)
         return True, NoError
+    
+    def loadFromSurfaceFactorys(self, surface_factorys, boneIndexMap: Optional[BoneIndexMap], armatureObject: Optional[bpy.types.Object]) -> Tuple[bool, ErrorMessage]:
+        surfaceIndexMap = {}
+        
+        
+        for lodLevel, sf in enumerate(surface_factorys):
+            lod, message = MdxmLOD.loadFromSurfaceFactory(
+                lodLevel, sf, surfaceIndexMap)
+            if lod is None:
+                return False, ErrorMessage(f"loading LOD {lodLevel} from Blender: {message}")
+            self.LODs.append(lod)
+        return True, NoError
 
     def calculateOffsets(self, ofsLODs):
         offset = ofsLODs
         for lod in self.LODs:
-            lod.calculateOffsets(offset)
+            lod.calculateOffsets()
             offset += lod.getSize()
 
     def saveToFile(self, file: BinaryIO) -> None:
@@ -1043,9 +1113,16 @@ class GLM:
             return False, ErrorMessage("Could not find model_root_0 object")
 
         # build hierarchy from first LOD
-        surfaceIndexMap: Dict[str, int] = {}  # surface name -> index
-        success, message = self.surfaceDataCollection.loadFromBlender(
-            rootObjects[0], surfaceIndexMap)
+        #surfaceIndexMap: Dict[str, int] = {}  # surface name -> index
+        #success, message = self.surfaceDataCollection.loadFromBlender(
+        #    rootObjects[0], surfaceIndexMap)
+        #if not success:
+        #    if skeleton_armature:
+        #        skeleton_armature.pose_position = old_pose
+        #    return False, message
+        
+        factory = JASurfaceFactory.Surface_factory(rootObjects[0], 1000)
+        success, message = self.surfaceDataCollection.loadFromSurfaceFactory(factory)
         if not success:
             if skeleton_armature:
                 skeleton_armature.pose_position = old_pose
@@ -1056,13 +1133,18 @@ class GLM:
         print(f"{self.header.numSurfaces} surfaces found")
 
         # load all LODs
-        success, message = self.LODCollection.loadFromBlender(
-            rootObjects, surfaceIndexMap, self.surfaceDataCollection, boneIndexMap, skeleton_object)
+        #success, message = self.LODCollection.loadFromBlender(
+        #    rootObjects, surfaceIndexMap, self.surfaceDataCollection, boneIndexMap, skeleton_object)
+        #if not success:
+        #   if skeleton_armature:
+        #        skeleton_armature.pose_position = old_pose
+        #    return False, message
+        success, message = self.LODCollection.loadFromSurfaceFactorys(
+            [factory], boneIndexMap, skeleton_object)
         if not success:
             if skeleton_armature:
                 skeleton_armature.pose_position = old_pose
             return False, message
-
         self.LODCollection.calculateOffsets(self.header.ofsLODs)
 
         #   calculate offsets etc.4
